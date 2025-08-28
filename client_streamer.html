@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice Chatbot Client</title>
+</head>
+<body>
+  <h1>Voice Chatbot</h1>
+  
+  <button onclick="startRecording()">Start Talking</button>
+  <button onclick="stopRecording()">Stop</button>
+  <button onclick="replayLastAnswer()">Replay Last Answer</button>
+  
+  <p><strong>Recognized Speech:</strong> <span id="recognizedText"></span></p>
+  <pre id="response"></pre>
+
+  <script>
+    let socket;
+    let audioContext = null;
+    let audioQueue = [];
+    let isPlaying = false;
+    let lastAnswerBuffer = null;
+
+    // STT vars
+    let recognition;
+    let finalTranscript = "";
+
+    function initWebSocket() {
+      console.log("Connecting to WebSocket...");
+      socket = new WebSocket('ws://localhost:8910');
+
+      socket.onopen = () => {
+        console.log("WebSocket connection established");
+      };
+
+      socket.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        console.log("Received data", data);
+
+        if (data.content) {
+            // Decode base64 → Int16 PCM
+            const bytes = Uint8Array.from(atob(data.content), c => c.charCodeAt(0));
+            const int16 = new Int16Array(bytes.buffer);
+
+            // Push raw PCM into queue
+            audioQueue.push(int16);
+            playAudioQueue();
+        }
+
+        if (data.error) {
+            document.getElementById('response').innerText = "Error: " + data.error;
+        }
+    };
+
+      socket.onclose = () => console.log("WebSocket connection closed");
+      socket.onerror = (error) => console.error("WebSocket error:", error);
+    }
+
+    let playheadTime = 0; // keeps track of scheduled time
+
+    async function playAudioQueue() {
+        if (!audioContext) {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 }); // force 24kHz
+        }
+
+        while (audioQueue.length > 0) {
+            const int16Array = audioQueue.shift();
+
+            try {
+            // Convert Int16 → Float32
+            const float32 = new Float32Array(int16Array.length);
+            for (let i = 0; i < int16Array.length; i++) {
+                float32[i] = int16Array[i] / 32768.0;
+            }
+
+            // Create buffer (1 channel, 24kHz)
+            const buffer = audioContext.createBuffer(1, float32.length, 24000);
+            buffer.copyToChannel(float32, 0);
+
+            // Keep last answer
+            lastAnswerBuffer = buffer;
+
+            const source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioContext.destination);
+
+            const now = audioContext.currentTime;
+            if (playheadTime < now) playheadTime = now;
+            source.start(playheadTime);
+            playheadTime += buffer.duration;
+
+            } catch (error) {
+            console.error("❌ Error playing audio chunk:", error);
+            }
+        }
+        }
+
+
+
+
+    function replayLastAnswer() {
+      if (lastAnswerBuffer && audioContext) {
+        const source = audioContext.createBufferSource();
+        source.buffer = lastAnswerBuffer;
+        source.connect(audioContext.destination);
+        source.start();
+      } else {
+        console.log("No answer available to replay");
+      }
+    }
+
+    function startRecording() {
+      if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+        alert("SpeechRecognition API not supported in this browser. Use Chrome.");
+        return;
+      }
+
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognition = new SpeechRecognition();
+      recognition.lang = "en-US";
+      recognition.interimResults = true;
+      recognition.continuous = true;
+
+      recognition.onresult = (event) => {
+        let interimTranscript = "";
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalTranscript += transcript + " ";
+          } else {
+            interimTranscript += transcript;
+          }
+        }
+        document.getElementById("recognizedText").innerText = finalTranscript + " " + interimTranscript;
+        console.log("Transcript updated:", finalTranscript + interimTranscript);
+      };
+
+      recognition.onstart = () => {
+        console.log("Speech recognition started...");
+        finalTranscript = "";
+      };
+
+      recognition.onerror = (event) => {
+        console.error("Speech recognition error:", event.error);
+      };
+
+      recognition.onend = () => {
+        console.log("Speech recognition ended, final transcript:", finalTranscript);
+
+        if (finalTranscript.trim()) {
+          const message = { message: finalTranscript.trim() };
+          console.log("Sending final transcript:", message);
+
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify(message));
+            console.log("Sent text message:", finalTranscript.trim());
+          } else {
+            console.error("WebSocket not open, state:", socket ? socket.readyState : "NO SOCKET");
+          }
+        } else {
+          console.warn("No transcript to send (empty)");
+        }
+      };
+
+      recognition.start();
+    }
+
+    function stopRecording() {
+      if (recognition) {
+        recognition.stop();
+        console.log("Speech recognition stop requested.");
+      }
+    }
+
+    window.onload = initWebSocket;
+  </script>
+</body>
+</html>
