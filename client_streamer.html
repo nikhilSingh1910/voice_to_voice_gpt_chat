@@ -20,7 +20,6 @@
     let audioContext = null;
     let audioQueue = [];
     let isPlaying = false;
-    let lastAnswerBuffer = null;
 
     // STT vars
     let recognition;
@@ -35,80 +34,104 @@
       };
 
       socket.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        console.log("Received data", data);
+          const data = JSON.parse(event.data);
+          console.log("Received data", data);
 
-        if (data.content) {
-            // Decode base64 → Int16 PCM
-            const bytes = Uint8Array.from(atob(data.content), c => c.charCodeAt(0));
-            const int16 = new Int16Array(bytes.buffer);
+          if (data.content) {
+              // Decode base64 → Int16 PCM
+              const bytes = Uint8Array.from(atob(data.content), c => c.charCodeAt(0));
+              const int16 = new Int16Array(bytes.buffer);
 
-            // Push raw PCM into queue
-            audioQueue.push(int16);
-            playAudioQueue();
-        }
+              // Push raw PCM into queue
+              audioQueue.push(int16);
+              playAudioQueue();
+          }
 
-        if (data.error) {
-            document.getElementById('response').innerText = "Error: " + data.error;
-        }
-    };
+          if (data.error) {
+              document.getElementById('response').innerText = "Error: " + data.error;
+          }
+
+          // finalize replay buffer when backend signals end
+          if (data.end) {
+              console.log("End of TTS stream, finalizing buffer");
+              finalizeLastAnswer();
+          }
+      };
 
       socket.onclose = () => console.log("WebSocket connection closed");
       socket.onerror = (error) => console.error("WebSocket error:", error);
     }
 
     let playheadTime = 0; // keeps track of scheduled time
+    let lastAnswerChunks = [];   // store chunks of current answer
+    let lastAnswerBuffer = null; // full merged buffer
 
     async function playAudioQueue() {
         if (!audioContext) {
-            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 }); // force 24kHz
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
         }
 
         while (audioQueue.length > 0) {
             const int16Array = audioQueue.shift();
 
             try {
-            // Convert Int16 → Float32
-            const float32 = new Float32Array(int16Array.length);
-            for (let i = 0; i < int16Array.length; i++) {
-                float32[i] = int16Array[i] / 32768.0;
-            }
+                // Convert Int16 → Float32
+                const float32 = new Float32Array(int16Array.length);
+                for (let i = 0; i < int16Array.length; i++) {
+                    float32[i] = int16Array[i] / 32768.0;
+                }
 
-            // Create buffer (1 channel, 24kHz)
-            const buffer = audioContext.createBuffer(1, float32.length, 24000);
-            buffer.copyToChannel(float32, 0);
+                // Create buffer (mono, 24kHz)
+                const buffer = audioContext.createBuffer(1, float32.length, 24000);
+                buffer.copyToChannel(float32, 0);
 
-            // Keep last answer
-            lastAnswerBuffer = buffer;
+                // Store chunk for replay
+                lastAnswerChunks.push(buffer);
 
-            const source = audioContext.createBufferSource();
-            source.buffer = buffer;
-            source.connect(audioContext.destination);
+                // Playback (streaming)
+                const source = audioContext.createBufferSource();
+                source.buffer = buffer;
+                source.connect(audioContext.destination);
 
-            const now = audioContext.currentTime;
-            if (playheadTime < now) playheadTime = now;
-            source.start(playheadTime);
-            playheadTime += buffer.duration;
+                const now = audioContext.currentTime;
+                if (playheadTime < now) playheadTime = now;
+                source.start(playheadTime);
+                playheadTime += buffer.duration;
 
             } catch (error) {
-            console.error("❌ Error playing audio chunk:", error);
+                console.error("Error playing audio chunk:", error);
             }
         }
-        }
+    }
 
+    // Merge chunks into one big buffer for replay
+    function finalizeLastAnswer() {
+        if (!audioContext || lastAnswerChunks.length === 0) return;
 
+        let totalLength = lastAnswerChunks.reduce((acc, buf) => acc + buf.length, 0);
+        let merged = audioContext.createBuffer(1, totalLength, 24000);
+        let offset = 0;
 
+        lastAnswerChunks.forEach(buf => {
+            merged.getChannelData(0).set(buf.getChannelData(0), offset);
+            offset += buf.length;
+        });
+
+        lastAnswerBuffer = merged;
+        lastAnswerChunks = []; // reset for next response
+    }
 
     function replayLastAnswer() {
-      if (lastAnswerBuffer && audioContext) {
-        const source = audioContext.createBufferSource();
-        source.buffer = lastAnswerBuffer;
-        source.connect(audioContext.destination);
-        source.start();
-      } else {
-        console.log("No answer available to replay");
-      }
+        if (lastAnswerBuffer && audioContext) {
+            const source = audioContext.createBufferSource();
+            source.buffer = lastAnswerBuffer;
+            source.connect(audioContext.destination);
+            source.start();
+        } else {
+            console.log("No full answer available to replay");
+        }
     }
+
 
     function startRecording() {
       if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {

@@ -240,10 +240,12 @@ async def ws_app(websocket):
         print("[WS] Connection closed")
         return
 
+
 async def main():
     print(f"Listening on ws://{WS_HOST}:{WS_PORT}")
     async with websockets.serve(ws_app, WS_HOST, WS_PORT, max_size=8_000_000):
         await asyncio.Future()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
